@@ -14,6 +14,9 @@ export const CFG = {
   sprint: 7.8,
   crouch: 2.6,
   step: 0.45,           // auto step-up height
+  hitRadius: 0.42,      // body hitbox radius (a little generous)
+  headRadius: 0.25,
+  leanDist: 0.38,       // how far Q/E leans the head sideways
 
   mag: 30,
   fireInterval: 60 / 700,
@@ -127,13 +130,14 @@ export function rayCylinderY(o, d, cx, cz, y0, y1, r) {
 
 /**
  * Test a ray against a player standing at feet position `f`.
+ * `off` = optional {x,z} sideways head offset (leaning).
  * Returns { t, head } or null.
  */
-export function rayPlayer(o, d, f, crouched) {
+export function rayPlayer(o, d, f, crouched, off) {
   const H = crouched ? CFG.heightCrouch : CFG.height;
-  const head = { x: f.x, y: f.y + H - 0.2, z: f.z };
-  const th = raySphere(o, d, head, 0.21);
-  const tb = rayCylinderY(o, d, f.x, f.z, f.y, f.y + H - 0.36, 0.36);
+  const head = { x: f.x + (off ? off.x : 0), y: f.y + H - 0.2, z: f.z + (off ? off.z : 0) };
+  const th = raySphere(o, d, head, CFG.headRadius);
+  const tb = rayCylinderY(o, d, f.x, f.z, f.y, f.y + H - 0.36, CFG.hitRadius);
   if (th >= 0 && (tb < 0 || th <= tb + 0.02)) return { t: th, head: true };
   if (tb >= 0) return { t: tb, head: false };
   return null;

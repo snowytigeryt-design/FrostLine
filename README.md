@@ -13,13 +13,15 @@ Roblox character as the player model, the winter assault rifle as the weapon) co
 | Space | jump (you can hop onto sandbags) |
 | Mouse / LMB / RMB | look / fire / aim down sights |
 | R | reload |
+| Q / E | lean left / right (peek around cover) |
 | Tab | scoreboard |
 
 ## Run it on your computer
 ```bash
 npm install
 npm start
-# open http://localhost:3000  (open it in two tabs to test multiplayer)
+# open http://localhost:3000 in TWO SEPARATE WINDOWS placed side by side
+# (a background browser tab pauses itself, so a second tab is a poor test)
 ```
 
 ## Put it online with GitHub + Render

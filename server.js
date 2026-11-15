@@ -260,17 +260,20 @@ function handleMessage(room, p, msg, now) {
     }
 
     case 'hit': {
-      if (!p.alive || room.over) break;
+      const rej = (why) => send(p, { t: 'rej', why });
+      if (room.over) return rej('match over');
+      if (!p.alive) return rej('you are not spawned');
       const target = room.players.get(msg.id | 0);
-      if (!target || target === p || !target.alive) break;
-      if (target.team === p.team) break;
-      if (now < target.protectUntil) break;
+      if (!target || target === p) return rej('no such target');
+      if (!target.alive) return rej('target not alive');
+      if (target.team === p.team) return rej('teammate');
+      if (now < target.protectUntil) return rej('target spawn-protected');
       // token bucket: ~12 hits/s, burst 3 (rifle fires ~11/s)
       p.tokens = Math.min(3, p.tokens + ((now - p.tokenT) / 1000) * 12);
       p.tokenT = now;
-      if (p.tokens < 1) break;
+      if (p.tokens < 1) return rej('too fast');
       const dx = target.x - p.x, dy = target.y - p.y, dz = target.z - p.z;
-      if (Math.sqrt(dx * dx + dy * dy + dz * dz) > MAX_HIT_RANGE) break;
+      if (Math.sqrt(dx * dx + dy * dy + dz * dz) > MAX_HIT_RANGE) return rej('out of range');
       p.tokens -= 1;
       const head = !!msg.head;
       applyDamage(room, p, target, head ? DMG_HEAD : DMG_BODY, head, now);

@@ -28,6 +28,9 @@ function el(tag, cls, text) {
 }
 const INTERP_MS = 110;      // remote players are rendered this far in the past
 const SEND_MS = 50;         // our state is sent at 20 Hz
+const LEAN_DIST = CFG.leanDist;
+const LEAN_ROLL = 0.22;     // camera roll (radians) at full lean
+const LEAN_BODY = 0.25;     // body tilt of other players leaning
 
 /* ======================================================================
    renderer / scene
@@ -247,8 +250,17 @@ function prepareAvatarTemplate() {
   AV.yawFix = Math.PI - Math.atan2(front.x, front.z) + (Q.has('flip') ? Math.PI : 0);
 
   // feet at the origin, centred
-  const cx = (box.min.x + box.max.x) / 2, cz = (box.min.z + box.max.z) / 2;
-  AV.offset.set(cx, box.min.y, cz).multiplyScalar(AV.scale).applyAxisAngle(new THREE.Vector3(0, 1, 0), AV.yawFix).negate();
+  let cx = (box.min.x + box.max.x) / 2, cz = (box.min.z + box.max.z) / 2, fy = box.min.y;
+  if (bones.LeftFoot && bones.RightFoot && bones.LowerTorso) {
+    // trust the skeleton over the mesh bounds if they disagree
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+    bones.LeftFoot.getWorldPosition(a); bones.RightFoot.getWorldPosition(b); bones.LowerTorso.getWorldPosition(c);
+    const bx = (a.x + b.x + c.x) / 3, bz = (a.z + b.z + c.z) / 3;
+    if (Math.hypot(bx - cx, bz - cz) > 0.08 * height) { console.warn('avatar: mesh bounds and skeleton disagree; using skeleton'); cx = bx; cz = bz; }
+    const ankle = Math.min(a.y, b.y);
+    if (fy > ankle || fy < ankle - 0.2 * height) fy = ankle - 0.02 * height;
+  }
+  AV.offset.set(cx, fy, cz).multiplyScalar(AV.scale).applyAxisAngle(new THREE.Vector3(0, 1, 0), AV.yawFix).negate();
 
   // per-bone: rest rotation + the "right" axis expressed in the parent's frame
   const q = new THREE.Quaternion();
@@ -531,15 +543,17 @@ const me = {
   yaw: 0, pitch: 0, recP: 0, recY: 0, bloom: 0,
   crouchT: 0, adsT: 0, sprintT: 0, adsHeld: false, firing: false, sprinting: false,
   mag: CFG.mag, reloading: false, reloadStart: 0, nextShot: 0, lastEmpty: 0, lastFire: 0,
-  speedH: 0, bobT: 0, stepAcc: 0, eye: CFG.eye, hurtFlash: 0, swayX: 0, swayY: 0, kick: 0,
+  lean: 0, speedH: 0, bobT: 0, stepAcc: 0, eye: CFG.eye, hurtFlash: 0, swayX: 0, swayY: 0, kick: 0,
 };
 const keys = {};
 let lastSend = 0;
+const dbgInfo = { sent: 0, ok: 0, rej: '' };
 
 const net = new Net({
   welcome: onWelcome, join: onJoin, leave: onLeave, snap: onSnap, shoot: onRemoteShoot,
   hurt: onHurt, hitc: onHitConfirm, kill: onKill, spawned: onSpawned, hp: (m) => { me.hp = m.hp; },
   over: onOver, reset: onReset,
+  rej: (m) => { dbgInfo.rej = m.why; if (DEBUG) notify('Hit ignored: ' + m.why, '#ff9a7a', true); },
   full: () => { net.ws.close(); menuMessage('That room is full (12 players). Try another room name.'); showMenu(); },
   closed: () => {
     if (connected) { connected = false; document.exitPointerLock && document.exitPointerLock(); menuMessage('Disconnected from server. Reload the page to reconnect.'); showMenu(); }
@@ -559,6 +573,7 @@ class Remote {
     this.yaw = info.yaw || 0; this.pitch = info.pitch || 0; this.m = info.m || 0;
     this.speed = 0; this.phase = Math.random() * 6; this.crouchT = 0; this.deadT = 0; this.diedAt = 0;
     this.stepAcc = 0; this.flashT = 0; this.lx = this.pos.x; this.lz = this.pos.z;
+    this.lean = 0; this.headOff = { x: 0, z: 0 }; this.dbg = null;
     this.av = makeAvatar(this.team, this.name);
     this.group = this.av.group;
     this.group.visible = this.alive;
@@ -589,6 +604,8 @@ class Remote {
       this.deadT = Math.min(1, this.deadT + dt * 2.4);
       const e = this.deadT * this.deadT * (3 - 2 * this.deadT);
       this.group.rotation.x = e * Math.PI * 0.5;
+      this.group.rotation.z = 0;
+      if (this.dbg) this.dbg.g.visible = false;
       this.group.position.set(this.pos.x, this.pos.y + e * 0.18, this.pos.z);
       this.av.tag.visible = false;
       if (now - this.diedAt > 6000) this.group.visible = false;
@@ -622,9 +639,16 @@ class Remote {
     this.av.tag.position.y = lerp(2.15, 1.75, this.crouchT);
     poseAvatar(this.av, this.speed, this.phase, this.pitch, this.crouchT, (this.m & 32) !== 0);
 
+    const leanT = (this.m & 128 ? 1 : 0) - (this.m & 64 ? 1 : 0);
+    this.lean = damp(this.lean, leanT, 11, dt);
+    this.headOff.x = Math.cos(this.yaw) * this.lean * LEAN_DIST;
+    this.headOff.z = -Math.sin(this.yaw) * this.lean * LEAN_DIST;
+
     this.group.position.copy(this.pos);
     this.group.rotation.y = this.yaw;
     this.group.rotation.x = 0;
+    this.group.rotation.z = -this.lean * LEAN_BODY;
+    if (DEBUG) this.updateDebugBox();
 
     // footsteps (crunching snow), positional
     if (this.speed > 1.4 && !(this.m & 1) && !(this.m & 32)) {
@@ -641,8 +665,25 @@ class Remote {
     this.av.rifle.flash.material.rotation = Math.random() * 6;
   }
 
+  updateDebugBox() {
+    if (!this.dbg) {
+      const mat = new THREE.MeshBasicMaterial({ color: 0xff00ff, wireframe: true, depthTest: false, fog: false });
+      const g = new THREE.Group();
+      const cyl = new THREE.Mesh(new THREE.CylinderGeometry(CFG.hitRadius, CFG.hitRadius, 1, 12, 1, true), mat);
+      const head = new THREE.Mesh(new THREE.SphereGeometry(CFG.headRadius, 10, 8), mat);
+      g.add(cyl, head);
+      scene.add(g);
+      this.dbg = { g, cyl, head };
+    }
+    const H = (this.m & 1) ? CFG.heightCrouch : CFG.height, bh = H - 0.36;
+    this.dbg.g.visible = true;
+    this.dbg.cyl.scale.y = bh;
+    this.dbg.cyl.position.set(this.pos.x, this.pos.y + bh / 2, this.pos.z);
+    this.dbg.head.position.set(this.pos.x + this.headOff.x, this.pos.y + H - 0.2, this.pos.z + this.headOff.z);
+  }
+
   setTeamTag() { this.av.tag.visible = this.team === me.team && this.alive; }
-  dispose() { scene.remove(this.group); }
+  dispose() { scene.remove(this.group); if (this.dbg) scene.remove(this.dbg.g); }
 }
 
 function remotes() {
@@ -736,6 +777,7 @@ function onHurt(m) {
 }
 
 function onHitConfirm(m) {
+  dbgInfo.ok++;
   const h = $('hitmarker');
   h.className = '';
   void h.offsetWidth;
@@ -755,7 +797,7 @@ function onKill(m) {
     me.deadUntil = performance.now() + (m.respawnMs || respawnMs);
     me.wantSpawn = true;
     me.killerId = m.killer; me.killerName = k ? k.name : '???';
-    me.reloading = false; me.firing = false; me.adsHeld = false;
+    me.reloading = false; me.firing = false; me.adsHeld = false; me.lean = 0;
     sfx.die();
   } else if (m.killer === me.id && v) {
     notify('ELIMINATED ' + v.name.toUpperCase(), '#ffd24a');
@@ -769,7 +811,7 @@ function onSpawned(m) {
     me.vel.set(0, 0, 0); me.vy = 0; me.onGround = true;
     me.hp = m.hp; me.alive = true; me.dead = false; me.wantSpawn = false;
     me.mag = CFG.mag; me.reloading = false; me.recP = me.recY = me.bloom = 0;
-    me.eye = CFG.eye; me.crouchT = 0; me.adsT = 0;
+    me.eye = CFG.eye; me.crouchT = 0; me.adsT = 0; me.lean = 0;
     if (p) p.alive = true;
     $('dead').hidden = true;
     sfx.spawn();
@@ -931,7 +973,7 @@ function fire(now) {
   let best = null;
   for (const r of remotes()) {
     if (!r.alive || r.team === me.team) continue;
-    const h = rayPlayer(_org, _dir, r.pos, (r.m & 1) !== 0);
+    const h = rayPlayer(_org, _dir, r.pos, (r.m & 1) !== 0, r.headOff);
     if (h && h.t < maxT && (!best || h.t < best.t)) best = { t: h.t, head: h.head, r };
   }
 
@@ -943,6 +985,7 @@ function fire(now) {
 
   if (best) {
     net.send({ t: 'hit', id: best.r.id, head: best.head });
+    dbgInfo.sent++;
     emit(_end, 6, { color: 0xb0161a, speed: 2.2, life: 0.35, size: 0.07, grav: 4, grow: 1.2 });
   } else if (world) {
     impact(world, _dir);
@@ -968,7 +1011,9 @@ function updateLocal(dt, now) {
 
   const fwdIn = input ? (keys.KeyW ? 1 : 0) - (keys.KeyS ? 1 : 0) : 0;
   const strIn = input ? (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0) : 0;
-  me.sprinting = input && !!keys.ShiftLeft && fwdIn > 0 && !crouched && !me.firing && !me.adsHeld;
+  const leanIn = input ? (keys.KeyE ? 1 : 0) - (keys.KeyQ ? 1 : 0) : 0;
+  me.lean = damp(me.lean, leanIn, 11, dt);
+  me.sprinting = input && !!keys.ShiftLeft && fwdIn > 0 && !crouched && !me.firing && !me.adsHeld && leanIn === 0;
 
   const sy = Math.sin(me.yaw), cy = Math.cos(me.yaw);
   let wx = -sy * fwdIn + cy * strIn, wz = -cy * fwdIn - sy * strIn;
@@ -1031,13 +1076,31 @@ function updateFire(now) {
 /* ======================================================================
    camera + viewmodel
    ====================================================================== */
+function eyeBlocked(x, z, y) {
+  for (const b of World.boxes) {
+    if (y < b.minY || y > b.maxY) continue;
+    if (x > b.minX - 0.12 && x < b.maxX + 0.12 && z > b.minZ - 0.12 && z < b.maxZ + 0.12) return true;
+  }
+  return false;
+}
+
 const orbit = { t: Math.random() * 6 };
 function updateCamera(dt, now) {
   if (me.alive) {
     const bob = me.onGround ? Math.sin(me.bobT * 2) * 0.012 * clamp(me.speedH / 5, 0, 1.4) * (1 - me.adsT * 0.8) : 0;
-    camera.position.set(me.pos.x, me.pos.y + me.eye + bob, me.pos.z);
+    const eyeY = me.pos.y + me.eye + bob;
+    let lx = 0, lz = 0;
+    if (Math.abs(me.lean) > 0.005) {
+      // lean sideways, but never push the camera into a wall
+      for (let k = 1; k > 0; k -= 0.25) {
+        const tx = me.pos.x + Math.cos(me.yaw) * me.lean * LEAN_DIST * k;
+        const tz = me.pos.z - Math.sin(me.yaw) * me.lean * LEAN_DIST * k;
+        if (!eyeBlocked(tx, tz, eyeY)) { lx = tx - me.pos.x; lz = tz - me.pos.z; break; }
+      }
+    }
+    camera.position.set(me.pos.x + lx, eyeY, me.pos.z + lz);
     const strafe = (keys.KeyD ? 1 : 0) - (keys.KeyA ? 1 : 0);
-    const roll = -strafe * 0.012 * (1 - me.adsT);
+    const roll = -strafe * 0.012 * (1 - me.adsT) - me.lean * LEAN_ROLL;
     camera.rotation.set(me.pitch + me.recP, me.yaw + me.recY, roll);
     const fov = lerp(75, 52, me.adsT);
     if (Math.abs(camera.fov - fov) > 0.01) { camera.fov = fov; camera.updateProjectionMatrix(); }
@@ -1085,7 +1148,7 @@ function updateViewmodel(dt, now) {
   const px = lerp(VM_HIP.x, VM_ADS.x, a) + Math.cos(me.bobT) * 0.008 * bobAmt + me.swayX;
   const py = lerp(VM_HIP.y, VM_ADS.y, a) + Math.abs(Math.sin(me.bobT)) * -0.008 * bobAmt + me.swayY - me.sprintT * 0.07;
   const pz = lerp(VM_HIP.z, VM_ADS.z, a) + me.kick * 0.035;
-  let rx = me.kick * 0.045 - me.sprintT * 0.5, ry = me.sprintT * 0.55, rz = me.sprintT * 0.2;
+  let rx = me.kick * 0.045 - me.sprintT * 0.5, ry = me.sprintT * 0.55, rz = me.sprintT * 0.2 - me.lean * LEAN_ROLL;
   let ox = 0, oy = 0;
   if (me.reloading) {
     const t = clamp((now - me.reloadStart) / (CFG.reloadTime * 1000), 0, 1);
@@ -1326,6 +1389,19 @@ function loadMap() {
   });
 }
 
+/* Network tick: runs on a timer (not the render loop) so a tab that is in the
+   background still spawns, and keeps sending its position. */
+function netTick() {
+  const now = performance.now();
+  if (connected && me.wantSpawn && !me.alive && now >= me.deadUntil && now - me.lastSpawnReq > 700 && !matchOver) requestSpawn(now);
+  if (connected && me.alive && now - lastSend >= SEND_MS - 3) {
+    lastSend = now;
+    const m = (me.crouchT > 0.5 ? 1 : 0) | (me.sprinting ? 2 : 0) | (me.adsT > 0.5 ? 4 : 0) | (me.reloading ? 8 : 0) |
+      (now - me.lastFire < 150 ? 16 : 0) | (!me.onGround ? 32 : 0) | (me.lean < -0.5 ? 64 : 0) | (me.lean > 0.5 ? 128 : 0);
+    net.send({ t: 's', x: +me.pos.x.toFixed(2), y: +me.pos.y.toFixed(2), z: +me.pos.z.toFixed(2), yaw: +me.yaw.toFixed(3), pitch: +me.pitch.toFixed(3), m });
+  }
+}
+
 /* ======================================================================
    main loop
    ====================================================================== */
@@ -1337,8 +1413,6 @@ function frame(now) {
   last = now;
   dt = Math.min(dt, 0.05);
 
-  if (connected && me.wantSpawn && !me.alive && now >= me.deadUntil && now - me.lastSpawnReq > 700 && !matchOver) requestSpawn(now);
-
   if (me.alive) updateLocal(dt, now);
   updateCamera(dt, now);
   updateFire(now);
@@ -1347,12 +1421,6 @@ function frame(now) {
   for (const r of remotes()) r.update(dt, now);
   updateFX(dt, now);
   sfx.setListener(camera.position, camera.getWorldDirection(_dir));
-
-  if (connected && me.alive && now - lastSend >= SEND_MS) {
-    lastSend = now;
-    const m = (me.crouchT > 0.5 ? 1 : 0) | (me.sprinting ? 2 : 0) | (me.adsT > 0.5 ? 4 : 0) | (me.reloading ? 8 : 0) | (now - me.lastFire < 150 ? 16 : 0) | (!me.onGround ? 32 : 0);
-    net.send({ t: 's', x: +me.pos.x.toFixed(2), y: +me.pos.y.toFixed(2), z: +me.pos.z.toFixed(2), yaw: +me.yaw.toFixed(3), pitch: +me.pitch.toFixed(3), m });
-  }
 
   if (!$('hud').hidden) {
     updateHUD(now);
@@ -1372,7 +1440,8 @@ function frame(now) {
     const f = $('fps');
     f.hidden = false;
     f.textContent = `${fpsShown} fps  ${renderer.info.render.calls} calls  ${(renderer.info.render.triangles / 1000).toFixed(0)}k tris\n` +
-      `pos ${me.pos.x.toFixed(1)}, ${(me.pos.y - CFG.groundY).toFixed(2)}, ${me.pos.z.toFixed(1)}  players ${players.size}`;
+      `pos ${me.pos.x.toFixed(1)}, ${(me.pos.y - CFG.groundY).toFixed(2)}, ${me.pos.z.toFixed(1)}  players ${players.size}\n` +
+      `hits sent ${dbgInfo.sent}  confirmed ${dbgInfo.ok}  last rejection: ${dbgInfo.rej || '-'}`;
   }
   renderer.info.reset();
 }
@@ -1380,6 +1449,7 @@ function frame(now) {
 async function boot() {
   initFX();
   setupMenu();
+  setInterval(netTick, 50);
   const gltf = await loadMap();
   buildWorld(gltf);
   buildViewmodel();
