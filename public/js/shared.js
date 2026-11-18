@@ -2,7 +2,7 @@
 
 export const CFG = {
   groundY: 30,          // the map's ground plane sits at y = 30
-  bounds: 54,           // playable half-size (metres) — pines ring the edge
+  bounds: 140,          // playable half-size (metres) — a forest belt rings the edge
   radius: 0.38,         // player body radius
   height: 1.8,          // standing height
   heightCrouch: 1.4,

@@ -146,3 +146,11 @@ table.sb caption { text-align: left; font-weight: 800; letter-spacing: 4px; padd
   #minimap { width: 110px; height: 110px; }
   #bottomLeft { width: 180px; } #hpNum { font-size: 38px; } #ammo b { font-size: 44px; }
 }
+
+select { width: 100%; margin-top: 5px; padding: 9px 10px; font: inherit; font-size: 16px; color: var(--ink);
+  background: rgba(0, 0, 0, .35); border: 1px solid var(--edge); border-radius: 6px; outline: none; }
+select option { background: #101a26; }
+#bigmap { left: 50%; top: 50%; transform: translate(-50%, -50%); padding: 10px; background: rgba(8, 14, 22, .88);
+  border: 1px solid var(--edge); border-radius: 10px; text-align: center; }
+#bigmap canvas { width: min(78vh, 90vw); height: min(78vh, 90vw); display: block; border-radius: 6px; }
+#bigmap .cap { margin-top: 6px; color: var(--dim); letter-spacing: 3px; font-size: 13px; }

@@ -13,6 +13,7 @@ Roblox character as the player model, the winter assault rifle as the weapon) co
 | Space | jump (you can hop onto sandbags) |
 | Mouse / LMB / RMB | look / fire / aim down sights |
 | R | reload |
+| M | full map |
 | Q / E | lean left / right (peek around cover) |
 | Tab | scoreboard |
 
@@ -45,6 +46,13 @@ npm start
 Notes for Render's free plan: the server sleeps after ~15 minutes with nobody connected, and the first visit after
 that takes up to a minute to wake it. Keep one tab open while you play. Free instances are shared CPU, so expect
 about 60 ms extra latency unless you pick a region near you.
+
+## The village (Part 1)
+The map is now 280 m x 280 m: the original compound in the middle, ring streets with houses (the barracks model), a container
+yard in the south-east, sandbag checkpoints and jersey barriers at the road mouths, watchtowers, lamps, crates and drums, and a
+forest belt around the edge. FROST deploys from the south, EMBER from the north. Layout is generated from a fixed seed in
+`public/js/layout.js`, so everyone gets the same map. See `ROADMAP.md` for the plan against the GDD.
+Menu -> Graphics (Low/Medium/High) controls view distance, shadows and resolution. Use Low on weak laptops.
 
 ## Tuning
 - Server settings can be changed with environment variables in the Render dashboard:

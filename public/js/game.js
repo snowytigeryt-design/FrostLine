@@ -3,6 +3,7 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 import { Net } from './net.js';
 import { Sfx } from './audio.js';
+import { buildVillage, trunkOffsets } from './village.js';
 import {
   CFG, TEAMS, clamp, lerp, damp, lerpAngle,
   movePlayer, floorHeight, blockedAt, rayPlayer, yawToward,
@@ -31,13 +32,20 @@ const SEND_MS = 50;         // our state is sent at 20 Hz
 const LEAN_DIST = CFG.leanDist;
 const LEAN_ROLL = 0.22;     // camera roll (radians) at full lean
 const LEAN_BODY = 0.25;     // body tilt of other players leaning
+const QUALITY = {
+  low: { cull: 105, shadow: 1024, pr: 1.0 },
+  med: { cull: 150, shadow: 2048, pr: 1.5 },
+  high: { cull: 190, shadow: 2048, pr: 1.75 },
+};
+const QNAME = QUALITY[Q.get('q')] ? Q.get('q') : (QUALITY[store.get('quality', 'med')] ? store.get('quality', 'med') : 'med');
+const QSET = QUALITY[QNAME];
 
 /* ======================================================================
    renderer / scene
    ====================================================================== */
 const canvas = $('c');
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.75));
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, QSET.pr));
 renderer.setSize(innerWidth, innerHeight);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -109,7 +117,7 @@ const hemi = new THREE.HemisphereLight(0xcfe2ff, 0xdfe7ef, 0.45);
 scene.add(hemi);
 const sun = new THREE.DirectionalLight(0xfff0dc, 2.9);
 sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
+sun.shadow.mapSize.set(QSET.shadow, QSET.shadow);
 {
   const sc = sun.shadow.camera;
   sc.left = -50; sc.right = 50; sc.top = 50; sc.bottom = -50; sc.near = 1; sc.far = 320;
@@ -159,6 +167,9 @@ const TEX_FLASH = flashTexture();
 const World = {
   boxes: [],        // walkable-collision boxes  {minX,maxX,minY,maxY,minZ,maxZ,kind}
   occluders: [],    // meshes bullets collide with
+  treeMarks: [],    // tree cluster centres (for the maps)
+  layout: null,     // village layout (roads etc.)
+  village: null,
   spawnRef: new THREE.Vector3(0, CFG.groundY, 23),
 };
 const AV = { tpl: null, ready: false, rest: {}, yawFix: 0, scale: 1, offset: new THREE.Vector3() };
@@ -181,6 +192,7 @@ function buildWorld(gltf) {
   scene.add(root);
   root.updateMatrixWorld(true);
   const maxAniso = renderer.capabilities.getMaxAnisotropy();
+  const TPLN = {};
 
   for (const node of [...root.children]) {
     const nm = node.name.replace(/_/g, ' ').toLowerCase();
@@ -191,6 +203,7 @@ function buildWorld(gltf) {
 
     const isGround = nm === 'ground';
     const isTree = /pines|fir/.test(nm);
+    TPLN[nm] = node;
 
     node.traverse((o) => {
       if (!o.isMesh) return;
@@ -203,11 +216,40 @@ function buildWorld(gltf) {
     });
 
     if (isGround) continue;
-    const box = boxFromObject(node, isTree ? 0.4 : 0);
-    box.kind = isTree ? 'tree' : 'solid';
+    if (isTree) {
+      // trees block movement only at their trunks
+      for (const [ox, oz] of trunkOffsets(node)) {
+        const p = new THREE.Vector3(ox, 0, oz).applyMatrix4(node.matrixWorld);
+        World.boxes.push({ minX: p.x - 0.4, maxX: p.x + 0.4, minZ: p.z - 0.4, maxZ: p.z + 0.4, minY: CFG.groundY, maxY: CFG.groundY + 14, kind: 'tree', name: 'trunk' });
+      }
+      World.treeMarks.push({ x: node.position.x, z: node.position.z, s: 1 });
+      continue;
+    }
+    if (nm === 'frostline radar tower') {
+      // open lattice: collide with the four legs only, so you can walk underneath
+      for (const sx of [-1, 1]) for (const sz of [-1, 1]) {
+        const cx = node.position.x + sx * 2.05, cz = node.position.z + sz * 2.05;
+        World.boxes.push({ minX: cx - 0.5, maxX: cx + 0.5, minZ: cz - 0.5, maxZ: cz + 0.5, minY: CFG.groundY, maxY: CFG.groundY + 15.9, kind: 'solid', name: 'tower-leg' });
+      }
+      continue;
+    }
+    const box = boxFromObject(node, 0);
+    box.kind = 'solid';
     box.name = nm;
     World.boxes.push(box);
   }
+
+  // the village: clones of the map's own buildings, containers, sandbags, towers and trees
+  const T = (n) => { if (!TPLN[n]) throw new Error('The map is missing the "' + n + '" object needed to build the village.'); return TPLN[n]; };
+  const treeNodes = Object.keys(TPLN).filter((k) => /pines|fir/.test(k)).sort().map((k) => TPLN[k]);
+  World.village = buildVillage({
+    scene, World, groundY: CFG.groundY, quality: QSET, aniso: maxAniso,
+    tpl: {
+      house: T('arctic barracks'), container: T('military freight container'),
+      sandA: T('north sandbags'), sandB: T('snow sandbag cover'), tower: T('frostline radar tower'), trees: treeNodes,
+    },
+  });
+  if (DEBUG) console.log('village objects:', World.village.count, 'colliders:', World.boxes.length);
   if (DEBUG) console.table(World.boxes.map((b) => ({ n: b.name, x0: b.minX.toFixed(1), x1: b.maxX.toFixed(1), z0: b.minZ.toFixed(1), z1: b.maxZ.toFixed(1), top: (b.maxY - CFG.groundY).toFixed(1) })));
   if (!AV.tpl) throw new Error('The map has no "Roblox Character" node to use as the player model.');
   if (!RF.tpl) throw new Error('The map has no "Winter assault rifle" node.');
@@ -471,10 +513,17 @@ function tracer(from, to) {
 }
 
 const _n = new THREE.Vector3();
+const _im = new THREE.Matrix4();
 function impact(hit, dir) {
   const p = hit.point;
   _n.set(0, 1, 0);
-  if (hit.face) _n.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
+  if (hit.face) {
+    if (hit.instanceId !== undefined && hit.object.isInstancedMesh) {
+      hit.object.getMatrixAt(hit.instanceId, _im);
+      _im.premultiply(hit.object.matrixWorld);
+      _n.copy(hit.face.normal).transformDirection(_im);
+    } else _n.copy(hit.face.normal).transformDirection(hit.object.matrixWorld);
+  }
   if (_n.dot(dir) > 0) _n.negate();
   const ground = hit.object.userData.kind === 'ground';
   if (ground) {
@@ -859,19 +908,19 @@ function onReset() {
 function pickSpawn() {
   const enemies = remotes().filter((r) => r.alive && r.team !== me.team);
   const cands = [];
-  for (let x = -48; x <= 48; x += 4) {
-    for (let z = -48; z <= 48; z += 4) {
-      if (me.team === 0 && z < 8) continue;        // FROST starts in the south…
-      if (me.team === 1 && z > -8) continue;       // …EMBER in the north
-      if (blockedAt(x, z, World.boxes, 1.6)) continue;
+  for (let x = -120; x <= 120; x += 6) {
+    for (let z = -120; z <= 120; z += 6) {
+      if (me.team === 0 && z < 72) continue;        // FROST deploys from the south edge…
+      if (me.team === 1 && z > -72) continue;       // …EMBER from the north edge
+      if (blockedAt(x, z, World.boxes, 1.8)) continue;
       let dmin = 999;
       for (const e of enemies) dmin = Math.min(dmin, Math.hypot(e.pos.x - x, e.pos.z - z));
-      cands.push({ x, z, score: dmin + Math.random() * 14 });
+      cands.push({ x, z, score: dmin + Math.random() * 30 });
     }
   }
   if (!cands.length) return { x: World.spawnRef.x, z: World.spawnRef.z };
   cands.sort((a, b) => b.score - a.score);
-  return cands[Math.floor(Math.random() * Math.min(6, cands.length))];
+  return cands[Math.floor(Math.random() * Math.min(8, cands.length))];
 }
 
 function requestSpawn(now) {
@@ -894,6 +943,7 @@ addEventListener('keydown', (e) => {
   keys[e.code] = true;
   if (e.code === 'Tab') { e.preventDefault(); showScoreboard(true); }
   if (e.code === 'KeyR') startReload(performance.now());
+  if (e.code === 'KeyM') toggleBigMap();
   if (e.code === 'Space' || e.code === 'ControlLeft' || e.code.startsWith('Arrow')) e.preventDefault();
 });
 addEventListener('keyup', (e) => {
@@ -1291,26 +1341,33 @@ function showScoreboard(on) {
 }
 
 const mmCtx = $('minimap').getContext('2d');
+
+// draws roads, buildings and trees in world coordinates (caller sets up the transform)
+function drawMapLayers(g, S, big) {
+  g.fillStyle = 'rgba(120,128,138,.55)';
+  for (const r of World.layout.roads) g.fillRect(r.minX * S, r.minZ * S, (r.maxX - r.minX) * S, (r.maxZ - r.minZ) * S);
+  g.fillStyle = 'rgba(70,130,90,.75)';
+  for (const t of World.treeMarks) { g.beginPath(); g.arc(t.x * S, t.z * S, 3.4 * t.s * S, 0, Math.PI * 2); g.fill(); }
+  for (const b of World.boxes) {
+    if (b.kind === 'tree') continue;
+    if (b.kind === 'prop' && !big) continue;
+    g.fillStyle = b.kind === 'prop' ? 'rgba(170,125,70,.9)' : b.name === 'tower-leg' ? '#1d2228' : 'rgba(58,72,66,.95)';
+    g.fillRect(b.minX * S, b.minZ * S, Math.max(1, (b.maxX - b.minX) * S), Math.max(1, (b.maxZ - b.minZ) * S));
+  }
+  g.strokeStyle = 'rgba(255,255,255,.35)';
+  g.strokeRect(-CFG.bounds * S, -CFG.bounds * S, CFG.bounds * 2 * S, CFG.bounds * 2 * S);
+}
+
 function drawMinimap() {
-  const W = 160, H = 160, S = 1.5;
+  const W = 160, H = 160, S = 1.1;
   mmCtx.clearRect(0, 0, W, H);
   mmCtx.save();
   mmCtx.beginPath(); mmCtx.arc(W / 2, H / 2, W / 2 - 2, 0, Math.PI * 2); mmCtx.clip();
-  mmCtx.fillStyle = 'rgba(214,228,240,.18)'; mmCtx.fillRect(0, 0, W, H);
+  mmCtx.fillStyle = 'rgba(214,228,240,.22)'; mmCtx.fillRect(0, 0, W, H);
   mmCtx.translate(W / 2, H / 2);
   mmCtx.rotate(me.yaw);
   mmCtx.translate(-me.pos.x * S, -me.pos.z * S);
-  for (const b of World.boxes) {
-    if (b.kind === 'tree') {
-      mmCtx.fillStyle = 'rgba(60,110,80,.8)';
-      mmCtx.beginPath(); mmCtx.arc((b.minX + b.maxX) / 2 * S, (b.minZ + b.maxZ) / 2 * S, 4.5 * S, 0, Math.PI * 2); mmCtx.fill();
-    } else {
-      mmCtx.fillStyle = 'rgba(150,165,180,.85)';
-      mmCtx.fillRect(b.minX * S, b.minZ * S, (b.maxX - b.minX) * S, (b.maxZ - b.minZ) * S);
-    }
-  }
-  mmCtx.strokeStyle = 'rgba(255,255,255,.25)';
-  mmCtx.strokeRect(-CFG.bounds * S, -CFG.bounds * S, CFG.bounds * 2 * S, CFG.bounds * 2 * S);
+  if (World.layout) drawMapLayers(mmCtx, S, false);
   for (const r of remotes()) {
     if (!r.alive || r.team !== me.team) continue;
     mmCtx.fillStyle = '#6dff8d';
@@ -1319,6 +1376,54 @@ function drawMinimap() {
   mmCtx.restore();
   mmCtx.fillStyle = '#ffd24a';
   mmCtx.beginPath(); mmCtx.moveTo(W / 2, H / 2 - 7); mmCtx.lineTo(W / 2 + 5, H / 2 + 5); mmCtx.lineTo(W / 2 - 5, H / 2 + 5); mmCtx.closePath(); mmCtx.fill();
+}
+
+// full-map overlay (M)
+const BIG = 720, BIGS = BIG / 300;
+let bigStatic = null;
+function buildBigStatic() {
+  const c = document.createElement('canvas');
+  c.width = c.height = BIG;
+  const g = c.getContext('2d');
+  g.fillStyle = '#cfdbe6'; g.fillRect(0, 0, BIG, BIG);
+  g.save();
+  g.translate(BIG / 2, BIG / 2);
+  drawMapLayers(g, BIGS, true);
+  g.font = '700 13px sans-serif'; g.textAlign = 'center';
+  const label = (t, x, z, col) => { g.fillStyle = 'rgba(0,0,0,.55)'; g.fillText(t, x * BIGS + 1, z * BIGS + 1); g.fillStyle = col || '#10202e'; g.fillText(t, x * BIGS, z * BIGS); };
+  label('OUTPOST', 0, -28);
+  label('INDUSTRIAL YARD', 98, 66);
+  label('RING ROAD', -90, 53);
+  label('WATCHTOWER', -100, -92);
+  label('WATCHTOWER', 100, -92);
+  label('WATCHTOWER', -100, 108);
+  label('FROST DEPLOY', 0, 128, '#1e66c0');
+  label('EMBER DEPLOY', 0, -122, '#c4561f');
+  g.restore();
+  return c;
+}
+function drawBigMap() {
+  if (!World.layout) return;
+  if (!bigStatic) bigStatic = buildBigStatic();
+  const g = $('bigmapCanvas').getContext('2d');
+  g.drawImage(bigStatic, 0, 0);
+  g.save();
+  g.translate(BIG / 2, BIG / 2);
+  for (const r of remotes()) {
+    if (!r.alive || r.team !== me.team) continue;
+    g.fillStyle = '#25c452';
+    g.beginPath(); g.arc(r.pos.x * BIGS, r.pos.z * BIGS, 5, 0, Math.PI * 2); g.fill();
+  }
+  g.translate(me.pos.x * BIGS, me.pos.z * BIGS);
+  g.rotate(-me.yaw);
+  g.fillStyle = '#ffb400'; g.strokeStyle = '#000'; g.lineWidth = 1.5;
+  g.beginPath(); g.moveTo(0, -9); g.lineTo(6, 7); g.lineTo(-6, 7); g.closePath(); g.fill(); g.stroke();
+  g.restore();
+}
+function toggleBigMap() {
+  const m = $('bigmap');
+  m.hidden = !m.hidden;
+  if (!m.hidden) drawBigMap();
 }
 
 /* ======================================================================
@@ -1333,6 +1438,13 @@ function setupMenu() {
   const nameEl = $('name'), roomEl = $('room');
   nameEl.value = store.get('name', '');
   roomEl.value = (Q.get('room') || store.get('room', 'main')).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 24) || 'main';
+  const qsel = $('quality');
+  qsel.value = QNAME;
+  qsel.addEventListener('change', () => {
+    store.set('quality', qsel.value);
+    store.set('name', nameEl.value.trim()); store.set('room', roomEl.value.trim() || 'main');
+    location.href = location.pathname + (Q.get('room') ? '?room=' + encodeURIComponent(Q.get('room')) : '');
+  });
   $('sens').value = String(sens);
   $('vol').value = store.get('vol', '0.8');
   sfx.volume = parseFloat($('vol').value);
@@ -1406,7 +1518,7 @@ function netTick() {
    main loop
    ====================================================================== */
 let last = performance.now();
-let mmTimer = 0, fpsAcc = 0, fpsN = 0, fpsShown = 0;
+let mmTimer = 0, cullT = 0, fpsAcc = 0, fpsN = 0, fpsShown = 0;
 function frame(now) {
   requestAnimationFrame(frame);
   let dt = (now - last) / 1000;
@@ -1418,13 +1530,14 @@ function frame(now) {
   updateFire(now);
   updateViewmodel(dt, now);
 
+  if (World.village && now - cullT > 250) { cullT = now; World.village.update(camera.position.x, camera.position.z); }
   for (const r of remotes()) r.update(dt, now);
   updateFX(dt, now);
   sfx.setListener(camera.position, camera.getWorldDirection(_dir));
 
   if (!$('hud').hidden) {
     updateHUD(now);
-    if (now - mmTimer > 90) { mmTimer = now; drawMinimap(); }
+    if (now - mmTimer > 90) { mmTimer = now; drawMinimap(); if (!$('bigmap').hidden) drawBigMap(); }
   }
 
   renderer.clear(true, true, true);

@@ -36,6 +36,9 @@
     <label>Room <small>(friends with the same room name play together)</small>
       <input id="room" maxlength="24" placeholder="main" autocomplete="off" spellcheck="false">
     </label>
+    <label>Graphics
+      <select id="quality"><option value="low">Low (weak laptops)</option><option value="med">Medium</option><option value="high">High</option></select>
+    </label>
     <div class="row">
       <label class="grow">Mouse sensitivity <input id="sens" type="range" min="0.3" max="3" step="0.05" value="1"></label>
       <label class="grow">Volume <input id="vol" type="range" min="0" max="1" step="0.05" value="0.8"></label>
@@ -55,6 +58,7 @@
       <span><kbd>R</kbd> reload</span>
       <span><kbd>Q</kbd> <kbd>E</kbd> lean</span>
       <span><kbd>Tab</kbd> scoreboard</span>
+      <span><kbd>M</kbd> full map</span>
     </div>
   </div>
 </div>
@@ -92,6 +96,11 @@
     <div id="deadTitle">ELIMINATED</div>
     <div id="deadBy"></div>
     <div id="deadTimer"></div>
+  </div>
+
+  <div id="bigmap" hidden>
+    <canvas id="bigmapCanvas" width="720" height="720"></canvas>
+    <div class="cap">FROSTLINE VILLAGE &nbsp;·&nbsp; press <kbd>M</kbd> to close</div>
   </div>
 
   <div id="scoreboard" hidden>
